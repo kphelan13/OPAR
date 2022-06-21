@@ -1,0 +1,507 @@
+#Load required packages
+library(DESeq2)
+library(edgeR)
+library(WGCNA)
+library(dendextend)
+library(heatmap3)
+library(limma)
+library(dplyr)
+library(tidyverse)
+library(scales)
+library(sva)
+library(ggrepel)
+library(patchwork)
+library(BIGverse)
+
+### Load raw OPAR count matrix
+raw_counts <- read.csv("combined_count_matrix_1_modified.csv", header=T, row.names=1)
+head(raw_counts)
+
+### Load phenotype data
+phen <- read.csv("May2022_metadata.csv", header=T)
+rownames(phen) <- phen$RNASeqIDs
+int.samples <- intersect(rownames(phen), colnames(raw_counts))
+traits <- phen[int.samples,]
+
+#Remove outlier samples
+BIGpicture::plot_pca(raw_counts, meta=traits,
+                     vars="SiteName", libraryID = "RNASeqIDs",
+                     transform_logCPM=TRUE)
+BIGpicture::plot_pca(raw_counts, meta=traits,
+                     vars="outlier", libraryID = "RNASeqIDs",
+                     outlier_sd = 2.5,  transform_logCPM=TRUE)
+pca3 <- BIGpicture::plot_pca(raw_counts, meta=traits,
+                             vars="outlier", libraryID = "RNASeqIDs",
+                             outlier_sd = 2.5,  transform_logCPM=TRUE)
+not.outlier <- pca3$outlier$data %>%
+  filter(col.group == "no")
+traits.out <- traits %>%
+  filter(RNASeqIDs %in% not.outlier$RNASeqIDs)
+raw_counts.out <- raw_counts %>%
+  select(1, all_of(traits.out$RNASeqIDs))
+
+#Create DGElist Object
+d0 <- DGEList(raw_counts.out, samples = traits.out)
+
+#Remove lowly-expressed genes and run Voom
+BIGpicture::plot_mv(d0, design = "~ FreqExacerbator")
+dat.abund <- RNAetc::filter_rare(d0, min.CPM = 0.1, min.sample = 10,
+                                 gene.var= "geneID")
+BIGpicture::plot_mv(dat.abund, design = "~ FreqExacerbator")
+dat.abund.norm <- calcNormFactors(dat.abund, method = "TMM")
+as.data.frame(dat.abund$counts) %>%
+  rownames_to_column() %>%
+  pivot_longer(-rowname) %>%
+  ggplot() +
+  geom_histogram(aes(x=value), bins = 100) +
+  theme_classic() +
+  labs(x = "count", y = "occurences") +
+  lims(x=c(0,1000))
+mm <- model.matrix(~FreqExacerbator, data = dat.abund.norm$samples)
+dat.abund.norm.voom <- voomWithQualityWeights(
+  dat.abund.norm,
+  design=mm,
+  plot=TRUE)
+plot_pca(dat.abund.norm.voom, vars = c("SiteName", "Batch", "Sex", "Race_Blk"), libraryID = "RNASeqIDs") %>%
+  wrap_plots(ncol=2)
+as.data.frame(dat.abund.norm$counts) %>%
+  write_csv("data_clean_counts.csv")
+as.data.frame(dat.abund.norm.voom$E) %>%
+  write_csv("data_clean_counts_voom.csv")
+
+#Determine DEGs
+dat <- dat.abund.norm.voom
+consensus.corr <- duplicateCorrelation(dat$E, mm,
+                                       block=dat$targets$Batch)$consensus.correlation
+consensus.corr
+y2 <- lmFit(dat, mm,
+            block = dat$targets$Batch,
+            correlation = consensus.corr)
+y2 <- eBayes(y2)
+top.table <- topTable(y2, sort.by = "P", n = Inf)
+head(top.table, 20)
+length(which(top.table$adj.P.Val < 0.3))
+
+#Write DEGs to file
+top.table$Gene <- rownames(top.table)
+top.table <- top.table[,c("Gene", names(top.table)[1:6])]
+write.csv(top.table, file = "DEGs_OPAR.csv")
+
+#Isolate genes with FDR <0.3 (n=2569) for module generation
+gene <- subset(top.table, top.table$adj.P.Val <0.3)
+cpm <- dat$E[rownames(gene),]
+hist(cpm)
+
+#############
+### WGCNA ###
+#############
+####check genes
+
+datExpr0 <- t(cpm)
+
+#Now cluster donors (in contrast to clustering genes later on...)
+sampleTree = hclust(dist(datExpr0), method = "average")
+# Plot the sample tree; tips will be ordered to some extent by library size,
+# Look for outliers along this continuum
+pdf("res.SampleTree_outliers.wgcna.pdf", height=48, width=64)
+par(cex = 0.6);
+par(mar = c(0,4,2,0))
+plot(sampleTree, main = "Sample clustering to detect outliers", sub="", xlab="", cex.lab = 1.5,
+     cex.axis = 1.5, cex.main = 2)
+abline(h=140,col="red")
+dev.off()
+
+# Determine cluster under the line
+clust = cutreeStatic(sampleTree, cutHeight = 100, minSize = 10)
+table(clust)
+# clust 1 contains the samples we want to keep.
+keepSamples = (clust==1)
+datExpr = datExpr0[keepSamples, ]
+nGenes = ncol(datExpr)
+nSamples = nrow(datExpr)
+
+#Re-create traits table with only samples that passed clustering
+int.samples <- intersect(rownames(traits), rownames(datExpr))
+traits <- traits[int.samples,]
+
+#Binarize categorical variables
+traits <- traits[,-c(1,3,4:7,8)]
+traits$Sex <- gsub("Male", "1", traits$Sex)
+traits$Sex <- gsub("Female", "0", traits$Sex)
+datTraits <- traits
+
+options(stringsAsFactors = FALSE)
+# Choose a set of soft-thresholding powers
+powers = c(c(1:10), seq(from = 12, to=20, by=2))
+# Call the network topology analysis function
+sft = pickSoftThreshold(datExpr, powerVector = powers, verbose = 5)
+# Plot the results:
+pdf("Pick_SoftThreshold.pdf")
+par(mfrow = c(1,2));
+cex1 = 0.9;
+# Scale-free topology fit index as a function of the soft-thresholding power
+plot(sft$fitIndices[,1], -sign(sft$fitIndices[,3])*sft$fitIndices[,2],
+     xlab="Soft Threshold (power)",ylab="Scale Free Topology Model Fit,signed R^2",type="n",
+     main = paste("Scale independence"));
+text(sft$fitIndices[,1], -sign(sft$fitIndices[,3])*sft$fitIndices[,2],
+     labels=powers,cex=cex1,col="red");
+# this line corresponds to using an R^2 cut-off of h
+abline(h=0.80,col="red")
+# Mean connectivity as a function of the soft-thresholding power
+plot(sft$fitIndices[,1], sft$fitIndices[,5],
+     xlab="Soft Threshold (power)",ylab="Mean Connectivity", type="n",
+     main = paste("Mean connectivity"))
+text(sft$fitIndices[,1], sft$fitIndices[,5], labels=powers, cex=cex1,col="red")
+dev.off()
+
+#Soft threshold <- 4
+#NOTE: Restart R prior to this step and ONLY load WGCNA package to avoid error
+net = blockwiseModules(datExpr, maxBlockSize = 600,
+                       power = 4, networkType = "signed", TOMType = "signed", minModuleSize = 15,
+                       reassignThreshold = 0, mergeCutHeight = 0.25,
+                       numericLabels = TRUE,
+                       saveTOMs = TRUE,
+                       saveTOMFileBase = NULL, deepSplit = 4,
+                       verbose = 3)
+table(net$colors)
+moduleLabels = net$colors
+moduleColors = labels2colors(net$colors)
+MEs = net$MEs;
+
+
+#Relating Genes/Modules to phenotypic data
+# Define numbers of genes and samples
+nGenes = ncol(datExpr);
+nSamples = nrow(datExpr);
+# Recalculate MEs with color labels
+MEs0 = moduleEigengenes(datExpr, moduleColors)$eigengenes
+MEs = orderMEs(MEs0)
+moduleTraitCor = cor(MEs, datTraits, use = "p");
+moduleTraitPvalue = corPvalueStudent(moduleTraitCor, nSamples);
+pdf("Module_Trait_Heatmap.pdf")
+# Will display correlations and their p-values
+textMatrix = paste(signif(moduleTraitCor, 2), "\n(",
+                   signif(moduleTraitPvalue, 1), ")", sep = "");
+dim(textMatrix) = dim(moduleTraitCor)
+par(mar = c(6, 8.5, 3, 3));
+# Display the correlation values within a heatmap plot
+labeledHeatmap(Matrix = moduleTraitCor,
+               xLabels = names(datTraits),
+               yLabels = names(MEs),
+               ySymbols = names(MEs),
+               colorLabels = FALSE,
+               colors = blueWhiteRed(50),
+               textMatrix = NULL,
+               cex.lab.y = 0,
+               setStdMargins = FALSE,
+               zlim = c(-1,1),
+               main = paste("Module-trait relationships"))
+dev.off()
+# Define variable risk containing the FreqExacerbator column of datTrait
+# Note: risk is our categorical variable for frequent and non-frequent exacerbators
+risk = as.data.frame(datTraits$FreqExacerbator);
+names(risk) = "Risk"
+# names (colors) of the modules
+modNames = substring(names(MEs), 3)
+geneModuleMembership = as.data.frame(cor(datExpr, MEs, use = "p"));
+MMPvalue = as.data.frame(corPvalueStudent(as.matrix(geneModuleMembership), nSamples));
+names(geneModuleMembership) = paste("MM", modNames, sep="");
+names(MMPvalue) = paste("p.MM", modNames, sep="");
+geneTraitSignificance = as.data.frame(cor(datExpr, risk, use = "p"));
+GSPvalue = as.data.frame(corPvalueStudent(as.matrix(geneTraitSignificance), nSamples));
+names(geneTraitSignificance) = paste("GS.", names(risk), sep="");
+names(GSPvalue) = paste("p.GS.", names(risk), sep="");
+
+#scatterplot
+module = "black"
+column = match(module, modNames);
+moduleGenes = moduleColors==module;
+par(mfrow = c(1,1));
+verboseScatterplot(abs(geneModuleMembership[moduleGenes, column]),
+                   abs(geneTraitSignificance[moduleGenes, 1]),
+                   xlab = paste("Module Membership in", module, "module"),
+                   ylab = "Gene significance for Exacerbation",
+                   main = paste("Module membership vs. gene significance\n"),
+                   cex.main = 1.2, cex.lab = 1.2, cex.axis = 1.2, col = module)
+
+#Create Dataframe for gene info related to exacerbation
+geneInfo0 = data.frame(
+  geneSymbol = colnames(datExpr),
+  moduleColor = moduleColors,
+  geneTraitSignificance,
+  GSPvalue)
+# Order modules by their significance for exacerbation
+modOrder = order(-abs(cor(MEs, risk, use = "p")));
+# Add module membership information in the chosen order
+for (mod in 1:ncol(geneModuleMembership))
+{
+  oldNames = names(geneInfo0)
+  geneInfo0 = data.frame(geneInfo0, geneModuleMembership[, modOrder[mod]],
+                         MMPvalue[, modOrder[mod]]);
+  names(geneInfo0) = c(oldNames, paste("MM.", modNames[modOrder[mod]], sep=""),
+                       paste("p.MM.", modNames[modOrder[mod]], sep=""))
+}
+# Order the genes in the geneInfo variable first by module color, then by geneTraitSignificance
+geneOrder = order(geneInfo0$moduleColor, -abs(geneInfo0$GS.Risk));
+geneInfo = geneInfo0[geneOrder, ]
+write.csv(geneInfo, file = "geneInfo.csv")
+
+#######
+MEs <- moduleEigengenes(datExpr, moduleColors)$eigengenes
+rownames(MEs) <- rownames(datExpr)
+MEs_no_grey <- MEs[,-which(colnames(MEs) %in% c("MEgrey"))]
+
+write.csv(MEs_no_grey,  file="WGCNA.ME.csv")
+
+# create table for genes and their corresponding module
+gene2module = data.frame(gene=colnames(datExpr), module=moduleColors)
+gene2module<-na.omit(gene2module)
+write.csv(gene2module, file="WGCNA.gene2module.csv")
+
+datKME <- signedKME(datExpr, MEs)
+write.csv(datKME, file="WGCNA.KME.csv")
+
+gene2module_with_cor <- gene2module
+gene2module_with_cor$cor <- NA
+
+for(i in unique(gene2module_with_cor$module)) {
+  kME_name <- paste0("kME",i)
+  idx <- which(gene2module_with_cor$module==i)
+  gene.idx <- as.character(gene2module_with_cor[idx,"gene"])
+  gene.idx <- gsub("-",".",gene.idx)
+  gene2module_with_cor$cor[idx] <- datKME[gene.idx,kME_name]
+  #print(kME_name)
+}
+write.csv(gene2module_with_cor, file="WGCNA.gene2module.with.cor.csv")
+
+###hub genes
+ADJ1 <- abs(cor(datExpr, use="p"))^6
+Alldegrees1=intramodularConnectivity(ADJ1, gene2module$module)
+hub_genes<-data.frame()
+for(i in 1:length(unique(gene2module$module))){
+  Alldegrees1$Module = gene2module$module
+  tmp = Alldegrees1[Alldegrees1$Module == unique(gene2module$module)[i], ]
+  hub_genes<-rbind(hub_genes, head(tmp[order(tmp$kWithin, decreasing=T),], n=nrow(tmp)))
+}
+
+write.csv(hub_genes, file="WGCNA.hub_genes.csv")
+
+save.image("Limma_WGCNA.RData")
+
+
+#save trait tables
+traitcor <- as.data.frame(moduleTraitCor)
+traitp <- as.data.frame(moduleTraitPvalue)
+write.csv(traitcor, file = "trait_cor.csv")
+write.csv(traitp, file = "trait_pval.csv")
+
+#####Module-Expression Boxplots##########
+#This section will create boxplots based on average module expression
+dat$E <- as.data.frame(dat$E) %>% 
+  rownames_to_column() %>% 
+  filter(rowname %in% rownames(gene)) %>% 
+  column_to_rownames()
+
+mods <- as.data.frame(net$colors) %>% 
+  rownames_to_column("geneName") %>%
+  #add leading 0 to module names for correct sorting of factor
+  mutate(module.char = ifelse(module <= 9, 
+                              paste("0", module, sep=""),
+                              module)) %>% 
+  #Add color var
+  mutate(mod.color = labels2colors(net$colors))
+
+
+
+##### Mean module expression #####
+voom.mods <- mods %>% 
+  #Combine count and module data
+  dplyr::select(geneName, mod.color) %>% 
+  left_join(rownames_to_column(dat$E, "geneName"),
+            by="geneName") %>% 
+  
+  #Calculate mean by module
+  group_by(mod.color) %>% 
+  summarise_if(is.numeric, mean, na.rm = TRUE) %>% 
+  rownames_to_column() 
+voom.mods <- as.data.frame(voom.mods)
+rownames(voom.mods) <- voom.mods[,2]
+voom.mods <- voom.mods[,-c(1,2)]
+
+library(impute)
+library(ggforce)
+library(magrittr)
+library(tidyverse)
+library(grid)
+mm <- model.matrix(~FreqExacerbator, data = dat$targets)
+consensus.corr <- duplicateCorrelation(voom.mods, mm,
+                                       block=dat$targets$Batch)$consensus.correlation
+y2 <- lmFit(voom.mods, mm,
+            block = dat$targets$Batch,
+            correlation = consensus.corr)
+y2 <- eBayes(y2)
+df <- topTable(y2, number = nrow(voom.mods))%>%
+  tibble::rownames_to_column("module")
+head(df)
+rownames(df) <- df[,1]
+df <- df[-10,]
+df <- df[,-1]
+df <- df[order(rownames(df)),]
+rnames <- c('M1: Synapse Formation, Cell-Cell Junction', 
+            'M2: Immune Cell Activation, Reg. of Immune System Process', 
+            'M3: Ciliary Organization, Ciliogenesis', 
+            'M4: ER Stress Response',
+            'M5: Synapse Formation, Axon Projection',
+            'M6: Basophil Differentiation, Cell-Cycle Initiation', 
+            'M7: Centriole Formation, Proliferation', 
+            'M8: Ciliary Process', 
+            'M9: Antigen Presentation, NK Cell Function')
+rownames(df) <- rnames
+write.csv(df, file = "Module_Table_Expr.csv")
+
+#Module Boxplots
+module_df <- as.data.frame(merge(t(voom.mods), dat$targets, by = 0))
+module_df$FreqExacerbator <- gsub("0", "Non-FEs", module_df$FreqExacerbator)
+module_df$FreqExacerbator <- gsub("1", "FEs", module_df$FreqExacerbator)
+rownames(module_df) <- module_df[,1]
+module_df <- module_df[,-6]
+#Change module names to numeric label with summary annotation
+cnames <- c('M1: Synapse Formation, Cell-Cell Junction', 
+            'M2: Immune Cell Activation, Reg. of Immune System Process', 
+            'M3: Ciliary Organization, Ciliogenesis', 
+            'M4: ER Stress Response',
+            'M5: Synapse Formation, Axon Projection',
+            'M6: Basophil Differentiation, Cell-Cycle Initiation', 
+            'M7: Centriole Formation, Proliferation', 
+            'M8: Ciliary Process', 
+            'M9: Antigen Presentation, NK Cell Function')
+colnames(module_df)[2:10] <- cnames
+
+df_p_val <- data.frame(
+  group1 = "FEs",
+  group2 = "Non-FEs",
+  label = df$adj.P.Val,
+  y.position = 6
+)
+rownames(df_p_val) = rownames(df)
+df_p_val$label <- substr(df_p_val$label, 1,5)
+module_df$FreqExacerbator <- factor(module_df$FreqExacerbator, levels = c("Non-FEs", "FEs"))
+
+for(mod in colnames(module_df[,2:10])) {
+  lab <- paste0("FDR =", df_p_val[mod,3])
+  grob <- grobTree(textGrob(lab, x=.83,  y=0.97, hjust=0,
+                            gp=gpar(col="black", fontsize=15, fontface="bold")))
+  ggplot(
+    module_df,
+    aes(
+      x = FreqExacerbator,
+      y = module_df[,mod],
+      color = FreqExacerbator
+    )
+  ) +
+    # a boxplot with outlier points hidden (they will be in the sina plot)
+    geom_boxplot(width = 0.25, outlier.shape = NA, lwd = 1.5, fatten = .5, show.legend = FALSE, position = position_dodge2(width = .5)) +
+    theme_bw() + theme(
+      axis.text.x = element_text(size = 12, face = "bold"), 
+      axis.text.y = element_text(size = 13, face = "bold"), 
+      axis.title.y = element_text(size = 12),
+      plot.title = element_text(hjust = 0.5, face = "bold", size = 15)) +
+    labs(x = NULL, y = "log2 Mean Expression", title = mod) +  scale_x_discrete() + 
+    geom_jitter(aes(color=FreqExacerbator), height=0, width=0.1, show.legend = FALSE)  +
+    scale_color_manual(values = c("firebrick","dodgerblue1")) + 
+    #Add mean as square symbol
+    stat_summary(fun.y=mean, geom="point",
+                 shape="square", color="black", size=3) +
+    annotation_custom(grob = grob)
+  myfile <- paste0(substr(mod, start = 1, stop = 2), "", ".pdf")
+  ggsave(filename = myfile, scale = .9)  
+}
+
+
+#######
+#Examination of Multiple Exacerbations#
+#######
+#Module Boxplots
+dat$targets$Exacerbation.Category <- factor(dat$targets$Exacerbation.Category, levels = c("1 Annual Exacerbation", "2 Annual Exacerbations", ">2 Annual Exacerbations"))
+
+#ANOVA
+mm <- model.matrix(~Exacerbation.Category, data = dat$targets)
+consensus.corr <- duplicateCorrelation(voom.mods, mm,
+                                       block=dat$targets$Batch)$consensus.correlation
+y2 <- lmFit(voom.mods, mm,
+            block = dat$targets$Batch,
+            correlation = consensus.corr)
+y2 <- eBayes(y2)
+df_mult <- topTable(y2, number = nrow(voom.mods))%>%
+  tibble::rownames_to_column("module")
+head(df_mult)
+write.csv(df_mult, file = "Module_Table_Expr.csv")
+
+#Make Contrasts
+mm <- model.matrix(~0+Exacerbation.Category, data = dat$targets)
+colnames(mm) <- c("One", "Two", "More")
+consensus.corr <- duplicateCorrelation(voom.mods, mm,
+                                       block=dat$targets$Batch)$consensus.correlation
+y2 <- lmFit(voom.mods, mm,
+            block = dat$targets$Batch,
+            correlation = consensus.corr)
+contrast.matrix <- makeContrasts(Two-One, More-One, More-Two, levels = mm)
+fit2 <- contrasts.fit(y2, contrast.matrix)
+fit2 <- eBayes(fit2)
+df_mult <- topTable(fit2, number = nrow(voom.mods), coef = 3)%>% #Specify coefficient (coef=1,2,etc) to specify contrast
+  tibble::rownames_to_column("module")
+head(df_mult)
+write.csv(df_mult, file = "Module_Table_Expr_3v2.csv")
+
+module_df$Exacerbation.Category <- factor(module_df$Exacerbation.Category, levels = c("1 Annual Exacerbation", "2 Annual Exacerbations", ">2 Annual Exacerbations"))
+for(mod in colnames(module_df[,2:11])) {
+  ggplot(
+    module_df,
+    aes(
+      x = Exacerbation.Category,
+      y = module_df[,mod],
+      color = Exacerbation.Category
+    )
+  ) +
+    # a boxplot with outlier points hidden (they will be in the sina plot)
+    geom_boxplot(width = 0.4, outlier.shape = NA, lwd = 1.5, fatten = .5, show.legend = FALSE) +
+    theme_bw() + theme(axis.text.x = element_text(size = 12, angle = 45, hjust = 1, face = "bold"), axis.text.y = element_text(size = 13, face = "bold"), axis.title.y = element_text(size = 11)) +
+    labs(x = NULL, y = "log2 Mean Expression") + 
+    scale_x_discrete()
+  myfile <- paste0(mod, "", "AnnualExacerbations.pdf")
+  ggsave(filename = myfile, scale = .9)  
+}
+
+#Function for Scatter Plots with Trend Lines
+module_df$Exacerbations <- factor(module_df$Exacerbations, levels = c("One", "Two", "Three", "Four to Five", "Six to Seven"))
+un_corr <- function(var, groupvar, dataset, xlab, ylab, filename, title) {
+  
+  pval <- aov(var ~ groupvar, data = dataset)
+  pval <- round((summary(pval)[[1]][["Pr(>F)"]][1]),4)
+  
+  plot <- dataset %>%
+    ggplot(aes(x = groupvar, y = var)) +
+    geom_point() +
+    geom_smooth(aes(x = as.numeric(groupvar), y = var),method='lm') +
+    theme_classic() + theme(plot.title = element_text(hjust = 0.5, face = "bold", size = 15)) +
+    labs(x = xlab, y = ylab) +
+    annotate("text", x = 5, y=min(var), label = paste("p =", pval), size = 4) +
+    labs(title = title)
+  
+  ggsave(filename = filename, dpi = 700)
+  
+  return(plot)
+  
+}
+
+un_corr(module_df$`M1: Synapse Formation, Cell-Cell Junction`, module_df$Exacerbations, module_df, "Annual Exacerbations", "Log2 Mean Expression", "M1.pdf", title = 'M1: Synapse Formation, Cell-Cell Junction')
+un_corr(module_df$`M2: Immune Cell Activation, Reg. of Immune System Process`, module_df$Exacerbations, module_df, "Annual Exacerbations", "Log2 Mean Expression", "M2.pdf", title = 'M2: Immune Cell Activation,\ Reg. of Immune System Process')
+un_corr(module_df$`M3: Ciliary Organization, Ciliogenesis`, module_df$Exacerbations, module_df, "Annual Exacerbations", "Log2 Mean Expression", "M3.pdf", title = 'M3: Ciliary Organization, Ciliogenesis')
+un_corr(module_df$`M4: ER Stress Response`, module_df$Exacerbations, module_df, "Annual Exacerbations", "Log2 Mean Expression", "M4.pdf", title = 'M4: ER Stress Response')
+un_corr(module_df$`M5: Synapse Formation, Axon Projection`, module_df$Exacerbations, module_df, "Annual Exacerbations", "Log2 Mean Expression", "M5.pdf", title = 'M5: Synapse Formation, Axon Projection')
+un_corr(module_df$`M6: Basophil Differentiation, Cell-Cycle Initiation`, module_df$Exacerbations, module_df, "Annual Exacerbations", "Log2 Mean Expression", "M6.pdf", title = 'M6: Basophil Differentiation, Cell-Cycle Initiation')
+un_corr(module_df$`M7: Centriole Formation, Proliferation`, module_df$Exacerbations, module_df, "Annual Exacerbations", "Log2 Mean Expression", "M7.pdf", title = 'M7: Centriole Formation, Proliferation')
+un_corr(module_df$`M8: Ciliary Process`, module_df$Exacerbations, module_df, "Annual Exacerbations", "Log2 Mean Expression", "M8.pdf", title = 'M8: Ciliary Process')
+un_corr(module_df$`M9: Antigen Presentation, NK Cell Function`, module_df$Exacerbations, module_df, "Annual Exacerbations", "Log2 Mean Expression", "M9.pdf", title = 'M9: Antigen Presentation, NK Cell Function')
+
+save.image("Limma_WGCNA.RData")
