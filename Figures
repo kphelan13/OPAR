@@ -1,0 +1,154 @@
+#Load Data for Required Plots
+load("~/Projects/Informatics Project/Lab Data/Limma_WGCNA_LargerModules/Limma_WGCNA.RData")
+
+#Load required packages
+library(DESeq2)
+library(edgeR)
+library(WGCNA)
+library(dendextend)
+library(heatmap3)
+library(limma)
+library(dplyr)
+library(tidyverse)
+library(scales)
+library(sva)
+library(ggrepel)
+library(patchwork)
+library(BIGverse)
+library(impute)
+library(ggforce)
+library(magrittr)
+library(tidyverse)
+library(grid)
+
+#Create Boxplots
+lab <- paste0("FDR =", df_p_val[1,3])
+grob <- grobTree(textGrob(lab, x=.87,  y=0.97, hjust=0,
+                          gp=gpar(col="black", fontsize=10, fontface="bold")))
+
+M1 <- ggplot(
+  module_df,
+  aes(
+  x = FreqExacerbator,
+  y = module_df[,2],
+  color = FreqExacerbator)) + 
+  geom_boxplot(width = 0.25, lwd = 1.5, fatten = .5, show.legend = FALSE, position = position_dodge(1)) + theme_bw() +
+  theme(
+    axis.text.x = element_text(size = 12, face = "bold"), 
+    axis.text.y = element_text(size = 13, face = "bold"), 
+    axis.title.y = element_text(size = 12),
+    plot.title = element_text(hjust = 0.5, face = "bold", size = 15)) +
+  labs(x = NULL, y = "log2 Mean Expression", title = 'M1: Synapse Formation, Cell-Cell Junction') +  scale_x_discrete() +
+  geom_jitter(aes(color=FreqExacerbator), height=0, width=0.1, show.legend = FALSE)  +
+  scale_color_manual(values = c("#5e3c99","#e66101")) + 
+  stat_summary(fun.y=mean, geom="point",
+               shape="square", color="black", size=3) +
+  annotation_custom(grob = grob)
+
+M1
+
+lab <- paste0("FDR =", df_p_val[5,3])
+grob <- grobTree(textGrob(lab, x=.87,  y=0.97, hjust=0,
+                          gp=gpar(col="black", fontsize=10, fontface="bold")))
+M5 <- ggplot(
+  module_df,
+  aes(
+    x = FreqExacerbator,
+    y = module_df[,6],
+    color = FreqExacerbator)) + 
+  geom_boxplot(width = 0.25, lwd = 1.5, fatten = .5, show.legend = FALSE, position = position_dodge(1)) + theme_bw() +
+  theme(
+    axis.text.x = element_text(size = 12, face = "bold"), 
+    axis.text.y = element_text(size = 13, face = "bold"), 
+    axis.title.y = element_text(size = 12),
+    plot.title = element_text(hjust = 0.5, face = "bold", size = 15)) +
+  labs(x = NULL, y = "log2 Mean Expression", title = 'M5: Synapse Formation, Axon Projection') +  scale_x_discrete() +
+  geom_jitter(aes(color=FreqExacerbator), height=0, width=0.1, show.legend = FALSE)  +
+  scale_color_manual(values = c("#5e3c99","#e66101")) + 
+  stat_summary(fun.y=mean, geom="point",
+               shape="square", color="black", size=3) +
+  annotation_custom(grob = grob)
+M5
+
+lab <- paste0("FDR =", df_p_val[2,3])
+grob <- grobTree(textGrob(lab, x=.87,  y=0.97, hjust=0,
+                          gp=gpar(col="black", fontsize=10, fontface="bold")))
+M2 <- ggplot(
+  module_df,
+  aes(
+    x = FreqExacerbator,
+    y = module_df[,3],
+    color = FreqExacerbator)) + 
+  geom_boxplot(width = 0.25, lwd = 1.5, fatten = .5, show.legend = FALSE, position = position_dodge(1)) + theme_bw() +
+  theme(
+    axis.text.x = element_text(size = 12, face = "bold"), 
+    axis.text.y = element_text(size = 13, face = "bold"), 
+    axis.title.y = element_text(size = 12),
+    plot.title = element_text(hjust = 0.5, face = "bold", size = 15)) +
+  labs(x = NULL, y = "log2 Mean Expression", title = 'M2: Immune Cell Activation, Reg. of Immune System Process') +  scale_x_discrete() +
+  geom_jitter(aes(color=FreqExacerbator), height=0, width=0.1, show.legend = FALSE)  +
+  scale_color_manual(values = c("#5e3c99","#e66101")) + 
+  stat_summary(fun.y=mean, geom="point",
+               shape="square", color="black", size=3) +
+  annotation_custom(grob = grob)
+M2
+
+lab <- paste0("FDR =", df_p_val[6,3])
+grob <- grobTree(textGrob(lab, x=.87,  y=0.97, hjust=0,
+                          gp=gpar(col="black", fontsize=10, fontface="bold")))
+M6 <- ggplot(
+  module_df,
+  aes(
+    x = FreqExacerbator,
+    y = module_df[,7],
+    color = FreqExacerbator)) + 
+  geom_boxplot(width = 0.25, lwd = 1.5, fatten = .5, show.legend = FALSE, position = position_dodge(1)) + theme_bw() +
+  theme(
+    axis.text.x = element_text(size = 12, face = "bold"), 
+    axis.text.y = element_text(size = 13, face = "bold"), 
+    axis.title.y = element_text(size = 12),
+    plot.title = element_text(hjust = 0.5, face = "bold", size = 15)) +
+  labs(x = NULL, y = "log2 Mean Expression", title = 'M6: Basophil Differentiation, Cell-Cycle Initiation') +  scale_x_discrete() +
+  geom_jitter(aes(color=FreqExacerbator), height=0, width=0.1, show.legend = FALSE)  +
+  scale_color_manual(values = c("#5e3c99","#e66101")) + 
+  stat_summary(fun.y=mean, geom="point",
+               shape="square", color="black", size=3) +
+  annotation_custom(grob = grob)
+M6
+
+#Multiple Exacerbations
+module_df$Exacerbations <- factor(module_df$Exacerbations, levels = c("One", "Two", "Three", "Four to Five", "Six to Seven"))
+un_corr <- function(var, groupvar, dataset, xlab, ylab, filename, title) {
+  
+  pval <- aov(var ~ groupvar, data = dataset)
+  pval <- round((summary(pval)[[1]][["Pr(>F)"]][1]),4)
+  
+  plot <- dataset %>%
+    ggplot(aes(x = groupvar, y = var)) +
+    geom_point() +
+    geom_smooth(aes(x = as.numeric(groupvar), y = var),method='lm') +
+    theme_classic() + theme(plot.title = element_text(hjust = 0.5, face = "bold", size = 15), axis.text.x = element_text(size = 12)) +
+    labs(x = xlab, y = ylab) +
+    annotate("text", x = 5, y=min(var), label = paste("p =", pval), size = 4) +
+    labs(title = title)
+  
+  ggsave(filename = filename, dpi = 700)
+  
+  return(plot)
+  
+}
+
+M1_mult <- un_corr(module_df$`M1: Synapse Formation, Cell-Cell Junction`, module_df$Exacerbations, module_df, "Annual Exacerbations", "Log2 Mean Expression", "M1.pdf", title = 'M1: Synapse Formation, Cell-Cell Junction')
+M2_mult <- un_corr(module_df$`M2: Immune Cell Activation, Reg. of Immune System Process`, module_df$Exacerbations, module_df, "Annual Exacerbations", "Log2 Mean Expression", "M2.pdf", title = 'M2: Immune Cell Activation,\ Reg. of Immune System Process')
+M3_mult <- un_corr(module_df$`M3: Ciliary Organization, Ciliogenesis`, module_df$Exacerbations, module_df, "Annual Exacerbations", "Log2 Mean Expression", "M3.pdf", title = 'M3: Ciliary Organization, Ciliogenesis')
+M4_mult <- un_corr(module_df$`M4: ER Stress Response`, module_df$Exacerbations, module_df, "Annual Exacerbations", "Log2 Mean Expression", "M4.pdf", title = 'M4: ER Stress Response')
+M5_mult <- un_corr(module_df$`M5: Synapse Formation, Axon Projection`, module_df$Exacerbations, module_df, "Annual Exacerbations", "Log2 Mean Expression", "M5.pdf", title = 'M5: Synapse Formation, Axon Projection')
+M6_mult <- un_corr(module_df$`M6: Basophil Differentiation, Cell-Cycle Initiation`, module_df$Exacerbations, module_df, "Annual Exacerbations", "Log2 Mean Expression", "M6.pdf", title = 'M6: Basophil Differentiation, Cell-Cycle Initiation')
+M7_mult <- un_corr(module_df$`M7: Centriole Formation, Proliferation`, module_df$Exacerbations, module_df, "Annual Exacerbations", "Log2 Mean Expression", "M7.pdf", title = 'M7: Centriole Formation, Proliferation')
+M8_mult <- un_corr(module_df$`M8: Ciliary Process`, module_df$Exacerbations, module_df, "Annual Exacerbations", "Log2 Mean Expression", "M8.pdf", title = 'M8: Ciliary Process')
+M9_mult <- un_corr(module_df$`M9: Antigen Presentation, NK Cell Function`, module_df$Exacerbations, module_df, "Annual Exacerbations", "Log2 Mean Expression", "M9.pdf", title = 'M9: Antigen Presentation, NK Cell Function')
+
+#Set Up Figure (patchwork)
+ptch <- (M1 | M5 | M2 | M6) / (M1_mult | M5_mult | M2_mult | M6_mult) 
+plot <- ptch +  plot_annotation(tag_levels = 'A')
+ggsave(filename = "Fig2.pdf", plot = plot, device = "pdf", scale = 1.7, width = 18, height = 6, units = "in")
