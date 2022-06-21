@@ -1,0 +1,134 @@
+
+####################
+#Perform after WGCNA has been run
+####################
+
+load("Limma_WGCNA.Rdata")
+library(Seurat)
+library(plotrix)
+library(heatmap3)
+library(DESeq2)
+library(beeswarm)
+library(DESeq2)
+library(tidyverse)
+library(WGCNA)
+library(ComplexHeatmap)
+library(circlize)
+
+#Calculate Average Expression of Modules for Each Subject
+dat$E <- as.data.frame(dat$E) %>% 
+  rownames_to_column() %>% 
+  filter(rowname %in% rownames(gene)) %>% 
+  column_to_rownames()
+
+mods <- as.data.frame(net$colors) %>% 
+  rownames_to_column("geneName") %>%
+  #add leading 0 to module names for correct sorting of factor
+  mutate(module.char = ifelse(module <= 9, 
+                              paste("0", module, sep=""),
+                              module)) %>% 
+  #Add color var
+  mutate(mod.color = labels2colors(net$colors))
+
+voom.mods <- mods %>% 
+  #Combine count and module data
+  dplyr::select(geneName, mod.color) %>% 
+  left_join(rownames_to_column(dat$E, "geneName"),
+            by="geneName") %>% 
+  
+  #Calculate mean by module
+  group_by(mod.color) %>% 
+  summarise_if(is.numeric, mean, na.rm = TRUE) %>% 
+  rownames_to_column() 
+voom.mods <- as.data.frame(voom.mods)
+rownames(voom.mods) <- voom.mods[,2]
+voom.mods <- voom.mods[,-c(1,2)]
+
+library(impute)
+library(ggforce)
+library(magrittr)
+library(tidyverse)
+mm <- model.matrix(~FreqExacerbator, data = dat$targets)
+consensus.corr <- duplicateCorrelation(voom.mods, mm,
+                                       block=dat$targets$Batch)$consensus.correlation
+y2 <- lmFit(voom.mods, mm,
+            block = dat$targets$Batch,
+            correlation = consensus.corr)
+y2 <- eBayes(y2)
+df <- topTable(y2, number = nrow(voom.mods))%>%
+  tibble::rownames_to_column("module")
+head(df)
+
+module_df <- as.data.frame(merge(t(voom.mods), dat$targets, by = 0))
+module_df$FreqExacerbator <- gsub("0", "Non-FE", module_df$FreqExacerbator)
+module_df$FreqExacerbator <- gsub("1", "FE", module_df$FreqExacerbator)
+rownames(module_df) <- module_df[,1]
+
+#Heatmap ordered by Exacerbation status and Module Annotation
+cells_order <- rownames(dat$targets[order(dat$targets$FreqExacerbator),])
+row_order <- c("magenta", "red", "turquoise", "brown", "black",
+               "yellow", "green", "pink", "blue")
+module_df <- module_df[,-6]
+mat2 <- t(module_df[,2:10])[row_order,cells_order]
+
+###make the heatmap
+mycols = colorRampPalette(c("blue","white","red"))(1000)
+breakscale = c(-8,seq(-1.3,1.3, length.out=length(mycols)-1), 8)
+margin <- c(10,10)
+
+#Clustered Heatmap
+mat3 <- t(module_df[,2:10])
+rnames <- c('M1: Synapse Formation,\nCell-Cell Junction', 
+            'M2: Immune Cell Activation,\nReg. of Immune System Process', 
+            'M3: Ciliary Organization,\nCiliogenesis', 
+            'M4: ER Stress Response',
+            'M5: Synapse Formation,\nAxon Projection',
+            'M6: Basophil Differentiation,\nCell-Cycle Initiation', 
+            'M7: Centriole Formation,\nProliferation', 
+            'M8: Ciliary Process', 
+            'M9: Antigen Presentation,\nNK Cell Function')
+rownames(mat3) = rnames
+ColSideAnn<-data.frame(module_df$Row.names, module_df$FreqExacerbator, module_df$Exacerbations, stringsAsFactors = TRUE)
+rownames(ColSideAnn)<- ColSideAnn[,1]
+colnames(ColSideAnn) <- c('Row Names', 'Status', 'Exacerbations')
+ColSideAnn<-ColSideAnn[,-1,drop=FALSE]
+ColSideAnn_1 <- ColSideAnn[,-2, drop = FALSE]
+
+#ComplexHeatmap
+scaled_mat = t(scale(t(mat3)))
+col_fun = colorRamp2(c(-1, 0, 1), c("blue", "white", "red"))
+library(dendextend)
+row_dend = as.dendrogram(hclust(dist(scaled_mat)))
+row_dend <- set(row_dend, "branches_lwd", 3)
+#col <- c("#d4b9da","#dd1c77")
+#row_dend = color_branches(row_dend, k = 2, col = col)
+col_dend = as.dendrogram(hclust(dist(t(scaled_mat))))
+col_dend = rotate(col_dend, 5:4)
+col_ann = HeatmapAnnotation(Status = ColSideAnn_1$Status,
+                            col = list(Status=c('FEs' = "#e66101", 'Non-FEs' = "#5e3c99")), 
+                            show_legend = T, 
+                            which = "column")
+lgd = Legend(col_fun = col_fun, title = "Scaled Expression", direction = "horizontal")
+pdf("Clustered_heatmap_.pdf", height=10,width=15)
+htmp <- Heatmap(scaled_mat, 
+          col = col_fun, 
+          cluster_rows = row_dend, 
+          cluster_columns = col_dend, 
+          column_dend_reorder = FALSE, 
+          row_split = 2,
+          row_title = NULL,
+          column_title = NULL,
+          row_gap = unit(3, "mm"),
+          border = TRUE,
+          top_annotation = col_ann,
+          heatmap_legend_param = list(
+            title = "Scaled Expression",
+            direction = "horizontal",
+            legend_width = unit(5, "cm")),
+          show_column_names = FALSE,
+          heatmap_width = unit(13, "in"), 
+          heatmap_height = unit(8, "in"))
+draw(htmp, heatmap_legend_side= "top", 
+     annotation_legend_side="right",
+     legend_grouping = "original") 
+dev.off()
